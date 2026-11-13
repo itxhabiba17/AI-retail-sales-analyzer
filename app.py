@@ -7,6 +7,7 @@ Run:  streamlit run app.py
 API key: put GROQ_API_KEY in .streamlit/secrets.toml  OR  set it as an environment variable.
 """
 import os
+import re
 from datetime import datetime
 
 import numpy as np
@@ -20,7 +21,11 @@ try:
 except ImportError:  # app still works without AI if the package is missing
     Groq = None
 
-MODEL = "llama-3.3-70b-versatile"
+# Groq retires models often, so the app asks Groq which models are live and picks the best one.
+# To force a model, set GROQ_MODEL (secrets or environment variable).
+PREFERRED_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "openai/gpt-oss-20b",
+                    "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-32b", "llama-3.1-8b-instant"]
+NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "playai", "embed", "compound")
 NAVY, DEEP, BLUE, LBLUE = "#14213D", "#1D3557", "#3A86FF", "#2563EB"
 PALETTE = [BLUE, "#15803D", "#F59E0B", "#8B5CF6", "#EF4444", "#06B6D4", "#EC4899", "#64748B"]
 
@@ -213,6 +218,28 @@ def api_key():
     return os.environ.get("GROQ_API_KEY") or st.session_state.get("manual_key", "")
 
 
+def setting(name):
+    """Read a setting from Streamlit secrets, then environment variables."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.environ.get(name)
+
+
+def pick_model(client):
+    """Choose a chat model that is currently available on this Groq account."""
+    if setting("GROQ_MODEL"):
+        return setting("GROQ_MODEL")
+    if "model" not in st.session_state:
+        available = [m.id for m in client.models.list().data if not any(x in m.id.lower() for x in NOT_CHAT)]
+        if not available:
+            raise RuntimeError("Your Groq account has no chat models available.")
+        st.session_state["model"] = next((m for m in PREFERRED_MODELS if m in available), available[0])
+    return st.session_state["model"]
+
+
 def ask_ai(system, prompt, temperature=0.3):
     """One call to the Groq LLM. Returns text, or raises a readable error."""
     if Groq is None:
@@ -222,9 +249,10 @@ def ask_ai(system, prompt, temperature=0.3):
         raise RuntimeError("No Groq API key found. Add GROQ_API_KEY to Streamlit secrets or paste it in the sidebar.")
     client = Groq(api_key=key)
     r = client.chat.completions.create(
-        model=MODEL, temperature=temperature, max_tokens=1300,
+        model=pick_model(client), temperature=temperature, max_tokens=3000,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}])
-    return r.choices[0].message.content
+    text = r.choices[0].message.content or ""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()  # some models print their reasoning
 
 
 def fact_check(text, f):
